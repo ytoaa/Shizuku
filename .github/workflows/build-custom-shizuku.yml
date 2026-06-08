@@ -12,6 +12,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          lfs: true
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -19,10 +20,15 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Show repository and signing state
+      - name: Diagnose repository signing state
         run: |
-          echo "=== repository ==="
+          set -euo pipefail
+
+          echo "=== pwd ==="
           pwd
+
+          echo
+          echo "=== git commit ==="
           git rev-parse --short HEAD
           git status --short
 
@@ -31,42 +37,106 @@ jobs:
           ls -lah
 
           echo
-          echo "=== signing.properties ==="
+          echo "=== git tracked signing/key-like files ==="
+          git ls-files | grep -Ei '(^|/)(signing\.properties|key\.jks|.*\.jks|.*\.keystore|.*\.p12|.*\.pfx)$' || true
+
+          echo
+          echo "=== find signing/key-like files before build ==="
+          find . -maxdepth 4 -type f \( \
+            -name 'signing.properties' -o \
+            -name 'key.jks' -o \
+            -name '*.jks' -o \
+            -name '*.keystore' -o \
+            -name '*.p12' -o \
+            -name '*.pfx' \
+          \) -print -exec ls -lah {} \;
+
+          echo
+          echo "=== signing.properties content ==="
           if [ -f signing.properties ]; then
-            ls -lah signing.properties
-            cat signing.properties
+            sed -n '1,120p' signing.properties
           else
             echo "signing.properties not found"
           fi
 
           echo
-          echo "=== key.jks ==="
+          echo "=== key.jks type and first bytes ==="
           if [ -f key.jks ]; then
-            ls -lah key.jks
+            file key.jks || true
+            xxd -l 160 key.jks || true
           else
             echo "key.jks not found"
           fi
 
           echo
           echo "=== signing.gradle ==="
-          sed -n '1,160p' signing.gradle
+          sed -n '1,200p' signing.gradle
 
           echo
-          echo "=== manager/build.gradle signing lines ==="
-          grep -n "signingConfigs\|buildTypes\|apply from\|preDebugBuild\|preReleaseBuild" manager/build.gradle || true
+          echo "=== manager/build.gradle signing/build type refs ==="
+          grep -n "signingConfigs\|buildTypes\|apply from\|preDebugBuild\|preReleaseBuild\|assemble" manager/build.gradle || true
+
+          echo
+          echo "=== all references to signing.properties / key.jks / KEYSTORE_FILE ==="
+          grep -RIn "signing\.properties\|key\.jks\|KEYSTORE_FILE\|KEYSTORE_PASSWORD\|KEYSTORE_ALIAS" . \
+            --exclude-dir=.git \
+            --exclude-dir=build \
+            --exclude-dir=.gradle || true
 
       - name: Accept Android SDK licenses
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
 
+      - name: Require original debug signing fallback
+        run: |
+          set -euo pipefail
+
+          echo "=== signing fallback guard ==="
+
+          if [ -f signing.properties ]; then
+            echo "ERROR: signing.properties exists."
+            echo "Shizuku signing.gradle will use KEYSTORE_FILE instead of Android debug signing."
+            echo
+            echo "Current signing.properties:"
+            cat signing.properties
+            exit 1
+          fi
+
+          echo "OK: signing.properties is absent."
+          echo "Original signing.gradle should fallback to Android debug signing."
+
       - name: Build original manager debug APK only
         run: |
+          set -euo pipefail
           chmod +x ./gradlew
+
           ./gradlew :manager:assembleDebug \
             --stacktrace \
             --info \
             --no-daemon \
             --no-configuration-cache
+
+      - name: Diagnose signing files after build
+        if: always()
+        run: |
+          echo "=== find signing/key-like files after build ==="
+          find . -maxdepth 5 -type f \( \
+            -name 'signing.properties' -o \
+            -name 'key.jks' -o \
+            -name '*.jks' -o \
+            -name '*.keystore' -o \
+            -name '*.p12' -o \
+            -name '*.pfx' \
+          \) -print -exec ls -lah {} \; || true
+
+          echo
+          echo "=== key.jks after build ==="
+          if [ -f key.jks ]; then
+            file key.jks || true
+            xxd -l 160 key.jks || true
+          else
+            echo "key.jks not found after build"
+          fi
 
       - name: Collect APK and reports
         if: always()
