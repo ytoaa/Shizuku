@@ -1,0 +1,152 @@
+name: Build Custom Shizuku
+
+on:
+  workflow_dispatch:
+
+env:
+  NEW_APP_ID: "to.solame.privileged.api"
+  NEW_APP_NAME: "Solame Privileged"
+  NEW_PERMISSION_PREFIX: "to.solame.manager.permission"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout workflow repo
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Clone Shizuku
+        run: |
+          git clone --recurse-submodules https://github.com/RikkaApps/Shizuku.git Shizuku
+
+      - name: Patch package name, app name, permissions, and icon
+        working-directory: Shizuku
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+          import os
+
+          new_app_id = os.environ["NEW_APP_ID"]
+          new_app_name = os.environ["NEW_APP_NAME"]
+          new_permission_prefix = os.environ["NEW_PERMISSION_PREFIX"]
+
+          old_app_id = "moe.shizuku.privileged.api"
+          old_permission_prefix = "moe.shizuku.manager.permission"
+
+          roots = [
+              "manager",
+              "server",
+              "shell",
+              "starter",
+              "common",
+              "api",
+              "provider",
+          ]
+
+          suffixes = {
+              ".gradle", ".kts", ".kt", ".java", ".xml", ".aidl",
+              ".cpp", ".c", ".h", ".properties", ".json", ".txt", ".md"
+          }
+
+          for root in roots:
+              p = Path(root)
+              if not p.exists():
+                  continue
+
+              for f in p.rglob("*"):
+                  if not f.is_file():
+                      continue
+                  if "build" in f.parts or ".git" in f.parts:
+                      continue
+                  if f.suffix.lower() not in suffixes:
+                      continue
+
+                  s = f.read_text(errors="ignore")
+                  old = s
+
+                  s = s.replace(old_app_id, new_app_id)
+                  s = s.replace(old_permission_prefix + ".", new_permission_prefix + ".")
+                  s = s.replace(old_permission_prefix, new_permission_prefix)
+
+                  if f.name == "strings.xml":
+                      s = s.replace(">Shizuku<", f">{new_app_name}<")
+                      s = s.replace(">Shizuku Manager<", f">{new_app_name}<")
+
+                  if s != old:
+                      f.write_text(s)
+
+          # Replace launcher icon reference to avoid using original Shizuku launcher assets.
+          manifest = Path("manager/src/main/AndroidManifest.xml")
+          if manifest.exists():
+              s = manifest.read_text(errors="ignore")
+              s = s.replace("@mipmap/ic_launcher", "@drawable/ic_launcher_custom")
+              s = s.replace("@mipmap/ic_launcher_round", "@drawable/ic_launcher_custom")
+              manifest.write_text(s)
+
+          drawable_dir = Path("manager/src/main/res/drawable")
+          drawable_dir.mkdir(parents=True, exist_ok=True)
+
+          (drawable_dir / "ic_launcher_custom.xml").write_text("""<?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path
+                  android:fillColor="#222222"
+                  android:pathData="M0,0h108v108h-108z" />
+              <path
+                  android:fillColor="#FFFFFF"
+                  android:pathData="M54,18a36,36 0,1 0,0.1 0M54,30a24,24 0,1 1,-0.1 0" />
+              <path
+                  android:fillColor="#FFFFFF"
+                  android:pathData="M50,38h8v32h-8zM42,50h24v8h-24z" />
+          </vector>
+          """)
+          PY
+
+      - name: Verify old identifiers are gone
+        working-directory: Shizuku
+        run: |
+          set +e
+
+          FOUND=0
+
+          grep -RIn \
+            "moe.shizuku.privileged.api\|moe.shizuku.manager.permission" \
+            manager server shell starter common api provider \
+            --exclude-dir=build \
+            --exclude-dir=.git && FOUND=1
+
+          if [ "$FOUND" = "1" ]; then
+            echo "Old package or permission identifiers still remain."
+            exit 1
+          fi
+
+          echo "Identifier check passed."
+
+      - name: Build debug APK
+        working-directory: Shizuku
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :manager:assembleDebug --stacktrace
+
+      - name: Collect APK
+        run: |
+          mkdir -p out
+          find Shizuku/manager/build/outputs/apk -type f -name "*.apk" -exec cp -v {} out/ \;
+          ls -lah out
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: custom-shizuku-debug-apk
+          path: out/*.apk
