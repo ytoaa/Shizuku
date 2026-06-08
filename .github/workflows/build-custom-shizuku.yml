@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout Shizuku
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -24,6 +24,10 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: gradle
+
+      - name: Accept Android SDK licenses
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
 
       - name: Patch package name, app name, permissions, icon, and signing
         run: |
@@ -46,6 +50,7 @@ jobs:
               "common",
               "api",
               "provider",
+              "rish",
           ]
 
           suffixes = {
@@ -109,26 +114,10 @@ jobs:
           """)
           PY
 
-          rm -f key.jks signing.properties
+          rm -f signing.properties key.jks custom-debug.jks
 
-          keytool -genkeypair \
-            -v \
-            -keystore custom-debug.jks \
-            -storetype JKS \
-            -storepass android \
-            -keypass android \
-            -alias androiddebugkey \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -dname "CN=Android Debug,O=Android,C=US"
-
-          cat > signing.properties <<'EOF'
-          KEYSTORE_FILE=custom-debug.jks
-          KEYSTORE_PASSWORD=android
-          KEYSTORE_ALIAS=androiddebugkey
-          KEYSTORE_ALIAS_PASSWORD=android
-          EOF
+          echo "=== signing files after cleanup ==="
+          ls -lah signing.properties key.jks custom-debug.jks 2>/dev/null || true
 
       - name: Verify old identifiers are gone
         run: |
@@ -137,7 +126,7 @@ jobs:
 
           grep -RIn \
             "moe.shizuku.privileged.api\|moe.shizuku.manager.permission" \
-            manager server shell starter common api provider \
+            manager server shell starter common api provider rish \
             --exclude-dir=build \
             --exclude-dir=.git && FOUND=1
 
@@ -151,7 +140,7 @@ jobs:
       - name: Build debug APK
         run: |
           chmod +x ./gradlew
-          ./gradlew :manager:assembleDebug --stacktrace
+          ./gradlew :manager:assembleDebug --stacktrace --no-configuration-cache
 
       - name: Collect APK
         run: |
