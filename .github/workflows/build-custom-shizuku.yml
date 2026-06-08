@@ -1,7 +1,12 @@
-name: Verify Original Shizuku Build
+name: Build Custom Shizuku
 
 on:
   workflow_dispatch:
+
+env:
+  NEW_APP_ID: "to.solame.privileged.api"
+  NEW_APP_NAME: "Solame Privileged"
+  NEW_PERMISSION_PREFIX: "to.solame.manager.permission"
 
 jobs:
   build:
@@ -20,77 +25,166 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Diagnose before cleanup
-        run: |
-          set -euo pipefail
-
-          echo "=== pwd ==="
-          pwd
-
-          echo
-          echo "=== git commit ==="
-          git rev-parse --short HEAD
-          git status --short
-
-          echo
-          echo "=== workflow files ==="
-          find .github/workflows -type f -maxdepth 2 -print -exec sed -n '1,220p' {} \;
-
-          echo
-          echo "=== root files before cleanup ==="
-          ls -lah
-
-          echo
-          echo "=== signing.gradle ==="
-          sed -n '1,200p' signing.gradle
-
-          echo
-          echo "=== signing.properties before cleanup ==="
-          if [ -f signing.properties ]; then
-            cat signing.properties
-          else
-            echo "signing.properties not found"
-          fi
-
-          echo
-          echo "=== key.jks before cleanup ==="
-          if [ -f key.jks ]; then
-            ls -lah key.jks
-            file key.jks || true
-            xxd -l 160 key.jks || true
-          else
-            echo "key.jks not found"
-          fi
-
-      - name: Force original debug signing fallback
+      - name: Disable original local signing files
         run: |
           set -euo pipefail
 
           rm -f signing.properties key.jks custom-debug.jks
 
-          echo "=== after cleanup ==="
+          echo "=== signing.gradle must exist ==="
+          test -f signing.gradle
+          sed -n '1,160p' signing.gradle
+
+          echo
+          echo "=== signing files after cleanup ==="
           ls -lah signing.properties key.jks custom-debug.jks 2>/dev/null || true
 
+      - name: Patch app id, app name, permission prefix, and icon
+        run: |
+          set -euo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+          import os
+
+          new_app_id = os.environ["NEW_APP_ID"]
+          new_app_name = os.environ["NEW_APP_NAME"]
+          new_permission_prefix = os.environ["NEW_PERMISSION_PREFIX"]
+
+          old_app_id = "moe.shizuku.privileged.api"
+          old_permission_prefix = "moe.shizuku.manager.permission"
+
+          roots = [
+              "manager",
+              "server",
+              "shell",
+              "starter",
+              "common",
+              "api",
+              "provider",
+              "rish",
+          ]
+
+          suffixes = {
+              ".gradle", ".kts", ".kt", ".java", ".xml", ".aidl",
+              ".cpp", ".c", ".h", ".properties", ".json", ".txt", ".md"
+          }
+
+          changed = []
+
+          for root in roots:
+              p = Path(root)
+              if not p.exists():
+                  continue
+
+              for f in p.rglob("*"):
+                  if not f.is_file():
+                      continue
+                  if "build" in f.parts or ".git" in f.parts:
+                      continue
+                  if f.suffix.lower() not in suffixes:
+                      continue
+
+                  s = f.read_text(errors="ignore")
+                  old = s
+
+                  s = s.replace(old_app_id, new_app_id)
+                  s = s.replace(old_permission_prefix + ".", new_permission_prefix + ".")
+                  s = s.replace(old_permission_prefix, new_permission_prefix)
+
+                  if f.name == "strings.xml":
+                      s = s.replace(">Shizuku<", f">{new_app_name}<")
+                      s = s.replace(">Shizuku Manager<", f">{new_app_name}<")
+
+                  if s != old:
+                      f.write_text(s)
+                      changed.append(str(f))
+
+          manifest = Path("manager/src/main/AndroidManifest.xml")
+          if manifest.exists():
+              s = manifest.read_text(errors="ignore")
+              old = s
+              s = s.replace("@mipmap/ic_launcher", "@drawable/ic_launcher_custom")
+              s = s.replace("@mipmap/ic_launcher_round", "@drawable/ic_launcher_custom")
+              if s != old:
+                  manifest.write_text(s)
+                  changed.append(str(manifest))
+
+          drawable_dir = Path("manager/src/main/res/drawable")
+          drawable_dir.mkdir(parents=True, exist_ok=True)
+
+          icon = drawable_dir / "ic_launcher_custom.xml"
+          icon.write_text("""<?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path
+                  android:fillColor="#222222"
+                  android:pathData="M0,0h108v108h-108z" />
+              <path
+                  android:fillColor="#FFFFFF"
+                  android:pathData="M54,18a36,36 0,1 0,0.1 0M54,30a24,24 0,1 1,-0.1 0" />
+              <path
+                  android:fillColor="#FFFFFF"
+                  android:pathData="M50,38h8v32h-8zM42,50h24v8h-24z" />
+          </vector>
+          """)
+          changed.append(str(icon))
+
+          print("=== changed files ===")
+          for f in changed:
+              print(f)
+          PY
+
+      - name: Verify patched identifiers
+        run: |
+          set -euo pipefail
+
+          echo "=== NEW_APP_ID occurrences ==="
+          grep -RIn "$NEW_APP_ID" manager server shell starter common api provider rish \
+            --exclude-dir=build \
+            --exclude-dir=.git || true
+
+          echo
+          echo "=== NEW_PERMISSION_PREFIX occurrences ==="
+          grep -RIn "$NEW_PERMISSION_PREFIX" manager server shell starter common api provider rish \
+            --exclude-dir=build \
+            --exclude-dir=.git || true
+
+          echo
+          echo "=== old identifier check ==="
+          if grep -RIn \
+            "moe.shizuku.privileged.api\|moe.shizuku.manager.permission" \
+            manager server shell starter common api provider rish \
+            --exclude-dir=build \
+            --exclude-dir=.git; then
+            echo "ERROR: old identifiers still remain."
+            exit 1
+          fi
+
+          echo
+          echo "=== signing.properties guard ==="
           if [ -f signing.properties ]; then
-            echo "ERROR: signing.properties still exists"
+            echo "ERROR: signing.properties exists before build."
             cat signing.properties
             exit 1
           fi
 
-          echo "OK: signing.properties is absent."
-          echo "Shizuku signing.gradle should now use Android debug signing fallback."
+          echo "OK: signing.properties is absent. signing.gradle should fallback to Android debug signing."
 
       - name: Accept Android SDK licenses
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
 
-      - name: Build original manager debug APK only
+      - name: Build custom debug APK
         run: |
           set -euo pipefail
           chmod +x ./gradlew
 
           if [ -f signing.properties ]; then
-            echo "ERROR: signing.properties was recreated before build"
+            echo "ERROR: signing.properties was recreated before build."
             cat signing.properties
             exit 1
           fi
@@ -102,10 +196,12 @@ jobs:
             --no-build-cache \
             --no-configuration-cache
 
-      - name: Diagnose after build
+      - name: Collect APK and diagnostics
         if: always()
         run: |
-          echo "=== signing files after build ==="
+          mkdir -p out/apk out/reports out/diagnostics
+
+          echo "=== signing files after build ===" | tee out/diagnostics/signing-files.txt
           find . -maxdepth 5 -type f \( \
             -name 'signing.properties' -o \
             -name 'key.jks' -o \
@@ -113,18 +209,10 @@ jobs:
             -name '*.keystore' -o \
             -name '*.p12' -o \
             -name '*.pfx' \
-          \) -print -exec ls -lah {} \; || true
+          \) -print -exec ls -lah {} \; | tee -a out/diagnostics/signing-files.txt || true
 
-          echo
-          echo "=== APK outputs ==="
-          find manager/build/outputs/apk -type f -name "*.apk" -print || true
-
-      - name: Collect APK and reports
-        if: always()
-        run: |
-          mkdir -p out/apk out/reports
-
-          find manager/build/outputs/apk -type f -name "*.apk" -exec cp -v {} out/apk/ \; || true
+          echo "=== APK outputs ===" | tee out/diagnostics/apk-files.txt
+          find manager/build/outputs/apk -type f -name "*.apk" -print -exec cp -v {} out/apk/ \; | tee -a out/diagnostics/apk-files.txt || true
 
           if [ -d build/reports ]; then
             cp -a build/reports out/reports/root-reports || true
@@ -134,12 +222,12 @@ jobs:
             cp -a manager/build/reports out/reports/manager-reports || true
           fi
 
-          find out -type f -print || true
+          find out -type f -print
           ls -lah out/apk || true
 
-      - name: Upload original build output
+      - name: Upload custom Shizuku APK
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: original-shizuku-debug-output
+          name: custom-shizuku-debug-output
           path: out/
