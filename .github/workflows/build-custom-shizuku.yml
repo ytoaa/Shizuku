@@ -29,8 +29,10 @@ jobs:
         run: |
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
 
-      - name: Patch package name, app name, permissions, icon, and signing
+      - name: Patch identifiers, app name, icon, and signing
         run: |
+          set -euo pipefail
+
           python3 <<'PY'
           from pathlib import Path
           import os
@@ -114,23 +116,54 @@ jobs:
           """)
           PY
 
-          rm -f signing.properties key.jks custom-debug.jks
+          rm -f key.jks signing.properties custom-debug.jks
 
-          echo "=== signing files after cleanup ==="
-          ls -lah signing.properties key.jks custom-debug.jks 2>/dev/null || true
+          keytool -genkeypair \
+            -v \
+            -keystore key.jks \
+            -storetype PKCS12 \
+            -storepass android \
+            -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Custom Shizuku,O=Custom,C=US"
 
-      - name: Verify old identifiers are gone
+          cat > signing.properties <<'EOF'
+          KEYSTORE_FILE=key.jks
+          KEYSTORE_PASSWORD=android
+          KEYSTORE_ALIAS=androiddebugkey
+          KEYSTORE_ALIAS_PASSWORD=android
+          EOF
+
+          echo "=== signing.properties ==="
+          cat signing.properties
+
+          echo "=== key.jks ==="
+          ls -lah key.jks
+
+          echo "=== keytool list ==="
+          keytool -list \
+            -keystore key.jks \
+            -storepass android \
+            -alias androiddebugkey
+
+      - name: Verify patch result
         run: |
-          set +e
-          FOUND=0
+          set -euo pipefail
 
-          grep -RIn \
+          echo "=== applicationId check ==="
+          grep -RIn "$NEW_APP_ID" manager server shell starter common api provider rish \
+            --exclude-dir=build \
+            --exclude-dir=.git || true
+
+          echo "=== old identifier check ==="
+          if grep -RIn \
             "moe.shizuku.privileged.api\|moe.shizuku.manager.permission" \
             manager server shell starter common api provider rish \
             --exclude-dir=build \
-            --exclude-dir=.git && FOUND=1
-
-          if [ "$FOUND" = "1" ]; then
+            --exclude-dir=.git; then
             echo "Old package or permission identifiers still remain."
             exit 1
           fi
@@ -139,17 +172,35 @@ jobs:
 
       - name: Build debug APK
         run: |
+          set -euo pipefail
           chmod +x ./gradlew
-          ./gradlew :manager:assembleDebug --stacktrace --no-configuration-cache
 
-      - name: Collect APK
+          ./gradlew \
+            clean \
+            :manager:assembleDebug \
+            --stacktrace \
+            --info \
+            --no-daemon \
+            --no-build-cache \
+            --no-configuration-cache \
+            --no-parallel
+
+      - name: Collect APK and reports
+        if: always()
         run: |
-          mkdir -p out
-          find manager/build/outputs/apk -type f -name "*.apk" -exec cp -v {} out/ \;
-          ls -lah out
+          mkdir -p out/apk out/reports
+
+          find manager/build/outputs/apk -type f -name "*.apk" -exec cp -v {} out/apk/ \; || true
+          find build/reports -type f -maxdepth 5 -print -exec cp --parents -v {} out/reports/ \; || true
+          find manager/build/reports -type f -maxdepth 5 -print -exec cp --parents -v {} out/reports/ \; || true
+
+          echo "=== APK files ==="
+          find out -type f -print
+          ls -lah out/apk || true
 
       - name: Upload APK artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: custom-shizuku-debug-apk
-          path: out/*.apk
+          name: custom-shizuku-build-output
+          path: out/
