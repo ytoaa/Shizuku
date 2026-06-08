@@ -20,7 +20,7 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      - name: Diagnose repository signing state
+      - name: Diagnose before cleanup
         run: |
           set -euo pipefail
 
@@ -33,93 +33,79 @@ jobs:
           git status --short
 
           echo
-          echo "=== root files ==="
+          echo "=== workflow files ==="
+          find .github/workflows -type f -maxdepth 2 -print -exec sed -n '1,220p' {} \;
+
+          echo
+          echo "=== root files before cleanup ==="
           ls -lah
-
-          echo
-          echo "=== git tracked signing/key-like files ==="
-          git ls-files | grep -Ei '(^|/)(signing\.properties|key\.jks|.*\.jks|.*\.keystore|.*\.p12|.*\.pfx)$' || true
-
-          echo
-          echo "=== find signing/key-like files before build ==="
-          find . -maxdepth 4 -type f \( \
-            -name 'signing.properties' -o \
-            -name 'key.jks' -o \
-            -name '*.jks' -o \
-            -name '*.keystore' -o \
-            -name '*.p12' -o \
-            -name '*.pfx' \
-          \) -print -exec ls -lah {} \;
-
-          echo
-          echo "=== signing.properties content ==="
-          if [ -f signing.properties ]; then
-            sed -n '1,120p' signing.properties
-          else
-            echo "signing.properties not found"
-          fi
-
-          echo
-          echo "=== key.jks type and first bytes ==="
-          if [ -f key.jks ]; then
-            file key.jks || true
-            xxd -l 160 key.jks || true
-          else
-            echo "key.jks not found"
-          fi
 
           echo
           echo "=== signing.gradle ==="
           sed -n '1,200p' signing.gradle
 
           echo
-          echo "=== manager/build.gradle signing/build type refs ==="
-          grep -n "signingConfigs\|buildTypes\|apply from\|preDebugBuild\|preReleaseBuild\|assemble" manager/build.gradle || true
+          echo "=== signing.properties before cleanup ==="
+          if [ -f signing.properties ]; then
+            cat signing.properties
+          else
+            echo "signing.properties not found"
+          fi
 
           echo
-          echo "=== all references to signing.properties / key.jks / KEYSTORE_FILE ==="
-          grep -RIn "signing\.properties\|key\.jks\|KEYSTORE_FILE\|KEYSTORE_PASSWORD\|KEYSTORE_ALIAS" . \
-            --exclude-dir=.git \
-            --exclude-dir=build \
-            --exclude-dir=.gradle || true
+          echo "=== key.jks before cleanup ==="
+          if [ -f key.jks ]; then
+            ls -lah key.jks
+            file key.jks || true
+            xxd -l 160 key.jks || true
+          else
+            echo "key.jks not found"
+          fi
 
-      - name: Accept Android SDK licenses
-        run: |
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
-
-      - name: Require original debug signing fallback
+      - name: Force original debug signing fallback
         run: |
           set -euo pipefail
 
-          echo "=== signing fallback guard ==="
+          rm -f signing.properties key.jks custom-debug.jks
+
+          echo "=== after cleanup ==="
+          ls -lah signing.properties key.jks custom-debug.jks 2>/dev/null || true
 
           if [ -f signing.properties ]; then
-            echo "ERROR: signing.properties exists."
-            echo "Shizuku signing.gradle will use KEYSTORE_FILE instead of Android debug signing."
-            echo
-            echo "Current signing.properties:"
+            echo "ERROR: signing.properties still exists"
             cat signing.properties
             exit 1
           fi
 
           echo "OK: signing.properties is absent."
-          echo "Original signing.gradle should fallback to Android debug signing."
+          echo "Shizuku signing.gradle should now use Android debug signing fallback."
+
+      - name: Accept Android SDK licenses
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null || true
 
       - name: Build original manager debug APK only
         run: |
           set -euo pipefail
           chmod +x ./gradlew
 
+          if [ -f signing.properties ]; then
+            echo "ERROR: signing.properties was recreated before build"
+            cat signing.properties
+            exit 1
+          fi
+
           ./gradlew :manager:assembleDebug \
             --stacktrace \
             --info \
             --no-daemon \
+            --no-build-cache \
             --no-configuration-cache
 
-      - name: Diagnose signing files after build
+      - name: Diagnose after build
         if: always()
         run: |
-          echo "=== find signing/key-like files after build ==="
+          echo "=== signing files after build ==="
           find . -maxdepth 5 -type f \( \
             -name 'signing.properties' -o \
             -name 'key.jks' -o \
@@ -130,13 +116,8 @@ jobs:
           \) -print -exec ls -lah {} \; || true
 
           echo
-          echo "=== key.jks after build ==="
-          if [ -f key.jks ]; then
-            file key.jks || true
-            xxd -l 160 key.jks || true
-          else
-            echo "key.jks not found after build"
-          fi
+          echo "=== APK outputs ==="
+          find manager/build/outputs/apk -type f -name "*.apk" -print || true
 
       - name: Collect APK and reports
         if: always()
@@ -153,12 +134,7 @@ jobs:
             cp -a manager/build/reports out/reports/manager-reports || true
           fi
 
-          echo
-          echo "=== collected files ==="
           find out -type f -print || true
-
-          echo
-          echo "=== apk dir ==="
           ls -lah out/apk || true
 
       - name: Upload original build output
