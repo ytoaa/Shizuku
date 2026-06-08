@@ -13,22 +13,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout workflow repo
+      - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Set up JDK
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
           cache: gradle
 
-      - name: Clone Shizuku
-        run: |
-          git clone --recurse-submodules https://github.com/RikkaApps/Shizuku.git Shizuku
-
-      - name: Patch package name, app name, permissions, and icon
-        working-directory: Shizuku
+      - name: Patch package name, app name, permissions, icon, and signing
         run: |
           python3 <<'PY'
           from pathlib import Path
@@ -83,7 +80,6 @@ jobs:
                   if s != old:
                       f.write_text(s)
 
-          # Replace launcher icon reference to avoid using original Shizuku launcher assets.
           manifest = Path("manager/src/main/AndroidManifest.xml")
           if manifest.exists():
               s = manifest.read_text(errors="ignore")
@@ -113,11 +109,30 @@ jobs:
           """)
           PY
 
+          rm -f key.jks signing.properties
+
+          keytool -genkeypair \
+            -v \
+            -keystore custom-debug.jks \
+            -storetype JKS \
+            -storepass android \
+            -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+          cat > signing.properties <<'EOF'
+          KEYSTORE_FILE=custom-debug.jks
+          KEYSTORE_PASSWORD=android
+          KEYSTORE_ALIAS=androiddebugkey
+          KEYSTORE_ALIAS_PASSWORD=android
+          EOF
+
       - name: Verify old identifiers are gone
-        working-directory: Shizuku
         run: |
           set +e
-
           FOUND=0
 
           grep -RIn \
@@ -134,7 +149,6 @@ jobs:
           echo "Identifier check passed."
 
       - name: Build debug APK
-        working-directory: Shizuku
         run: |
           chmod +x ./gradlew
           ./gradlew :manager:assembleDebug --stacktrace
@@ -142,7 +156,7 @@ jobs:
       - name: Collect APK
         run: |
           mkdir -p out
-          find Shizuku/manager/build/outputs/apk -type f -name "*.apk" -exec cp -v {} out/ \;
+          find manager/build/outputs/apk -type f -name "*.apk" -exec cp -v {} out/ \;
           ls -lah out
 
       - name: Upload APK artifact
